@@ -209,6 +209,8 @@ pub struct CenterScratch {
     hs: Vec<(Mat3, Mat3)>,
     res: Vec<f64>,
     valid: Vec<bool>,
+    tmp: Vec<f32>,
+    n_pairs: Vec<u32>,
 }
 
 /// `imageCenterOptimizationGlob`: one 5x5 grid pass. Returns `false` when no
@@ -250,17 +252,16 @@ pub fn image_center_optimization_glob(
         sc.hs.push((th, th.inverse()));
     }
     // 2. signals for every grid point, sequentially, with the sticky out-of-bounds flags
-    sc.sig.clear();
     sc.sig.resize(nc * ns * g, 0.0);
-    sc.readable.clear();
     sc.readable.resize(g * nc, false);
-    let mut tmp = vec![0.0f32; ns];
+    sc.tmp.resize(ns, 0.0);
+    let tmp = &mut sc.tmp;
     for (gi, (th, th_inv)) in sc.hs.iter().enumerate() {
         for (ci, cut) in cuts.iter_mut().enumerate() {
             // start from the cut's current (stale) samples, exactly like upstream
             tmp.copy_from_slice(&cut.signal);
-            let oob = extract_signal_into(cut, src, th, th_inv, &mut tmp);
-            cut.signal.copy_from_slice(&tmp);
+            let oob = extract_signal_into(cut, src, th, th_inv, tmp);
+            cut.signal.copy_from_slice(tmp);
             if oob {
                 cut.out_of_bounds = true;
             }
@@ -273,7 +274,9 @@ pub fn image_center_optimization_glob(
     // 3. cost chains in lock-step over the grid points
     sc.res.clear();
     sc.res.resize(g, 0.0);
-    let mut n_pairs = vec![0u32; g];
+    sc.n_pairs.resize(g, 0);
+    sc.n_pairs.fill(0);
+    let n_pairs = &mut sc.n_pairs;
     sc.valid.clear();
     sc.valid.resize(g, false);
     for i in 0..nc.saturating_sub(1) {
@@ -292,6 +295,15 @@ pub fn image_center_optimization_glob(
             }
             let base_i = i * ns * g;
             let base_j = j * ns * g;
+            if g == 25 {
+                accumulate_25(
+                    &sc.sig[base_i..base_i + ns * g],
+                    &sc.sig[base_j..base_j + ns * g],
+                    &sc.valid,
+                    &mut sc.res,
+                );
+                continue;
+            }
             for k in 0..ns {
                 let a = &sc.sig[base_i + k * g..base_i + k * g + g];
                 let b = &sc.sig[base_j + k * g..base_j + k * g + g];
@@ -324,6 +336,77 @@ pub fn image_center_optimization_glob(
     *center = opt_point;
     *h = opt_h;
     has_solution
+}
+
+// Each lane owns a grid point, so SIMD never reassociates a reduction.
+// Compute invalid lanes locally and discard them once per pair; this removes
+// the validity branch from every sample while preserving the sticky flags.
+fn accumulate_25(a: &[f32], b: &[f32], valid: &[bool], res: &mut [f64]) {
+    assert_eq!(a.len(), b.len());
+    assert_eq!(a.len() % 25, 0);
+    assert_eq!(valid.len(), 25);
+    assert_eq!(res.len(), 25);
+    #[cfg(target_arch = "aarch64")]
+    {
+        // SAFETY: AArch64 has NEON; lengths checked above ensure every 2-lane
+        // load/store is in bounds. The last (25th) lane is scalar.
+        unsafe {
+            accumulate_25_neon(a, b, valid, res);
+        }
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    accumulate_25_scalar(a, b, valid, res);
+}
+
+#[cfg(any(test, not(target_arch = "aarch64")))]
+fn accumulate_25_scalar(a: &[f32], b: &[f32], valid: &[bool], res: &mut [f64]) {
+    let mut r: [f64; 25] = res.try_into().unwrap();
+    for (a, b) in a.chunks_exact(25).zip(b.chunks_exact(25)) {
+        for gi in 0..25 {
+            let d = (a[gi] - b[gi]) as f64;
+            r[gi] = (r[gi] + d * d) as f32 as f64;
+        }
+    }
+    for gi in 0..25 {
+        if valid[gi] {
+            res[gi] = r[gi];
+        }
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn accumulate_25_neon(a: &[f32], b: &[f32], valid: &[bool], res: &mut [f64]) {
+    use std::arch::aarch64::*;
+    // SAFETY: caller checks all lengths; q*2+1 <= 23 and chunks have 25 entries.
+    unsafe {
+        let mut r: [float64x2_t; 12] = core::array::from_fn(|q| vld1q_f64(res.as_ptr().add(q * 2)));
+        let mut tail = res[24];
+        for (a, b) in a.chunks_exact(25).zip(b.chunks_exact(25)) {
+            for q in 0..12 {
+                let diff = vsub_f32(
+                    vld1_f32(a.as_ptr().add(q * 2)),
+                    vld1_f32(b.as_ptr().add(q * 2)),
+                );
+                let d = vcvt_f64_f32(diff);
+                // Separate multiply/add, then narrow every term, exactly as
+                // float(double(res) + double(float(a-b))^2). No FMA.
+                r[q] = vcvt_f64_f32(vcvt_f32_f64(vaddq_f64(r[q], vmulq_f64(d, d))));
+            }
+            let d = (a[24] - b[24]) as f64;
+            tail = (tail + d * d) as f32 as f64;
+        }
+        let mut out = [0.0; 25];
+        for q in 0..12 {
+            vst1q_f64(out.as_mut_ptr().add(q * 2), r[q]);
+        }
+        out[24] = tail;
+        for gi in 0..25 {
+            if valid[gi] {
+                res[gi] = out[gi];
+            }
+        }
+    }
 }
 
 /// `refineConicFamilyGlob` (Identification.cpp:809-961).
@@ -424,4 +507,33 @@ pub fn image_center_optimization_glob_reference(
     *center = opt_point;
     *h = opt_h;
     has_solution
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn fixed_grid_matches_scalar_for_masks_and_lengths() {
+        let mut seed = 912u32;
+        for ns in [0, 1, 7, 99, 100, 101] {
+            let mut next = || {
+                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                (seed >> 8) as f32 / 65536.0
+            };
+            let a: Vec<_> = (0..ns * 25).map(|_| next()).collect();
+            let b: Vec<_> = (0..ns * 25).map(|_| next()).collect();
+            for mask in [0u32, u32::MAX, 0x1555555, 0x1f00ff] {
+                let valid: Vec<_> = (0..25).map(|i| (mask >> i) & 1 != 0).collect();
+                let mut expected: Vec<_> = (0..25).map(|i| (i as f32 * 1.3) as f64).collect();
+                let mut actual = expected.clone();
+                accumulate_25_scalar(&a, &b, &valid, &mut expected);
+                accumulate_25(&a, &b, &valid, &mut actual);
+                assert_eq!(
+                    actual.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                    expected.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                    "ns={ns} mask={mask:x}"
+                );
+            }
+        }
+    }
 }

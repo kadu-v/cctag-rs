@@ -19,6 +19,7 @@ pub struct Level {
 struct LevelScratch {
     temp: Plane<u8>,
     canny_ws: CannyWorkspace,
+    derivative_ws: dog::DerivativeWorkspace,
 }
 
 #[derive(Debug, Default)]
@@ -55,7 +56,12 @@ impl ImagePyramid {
             }
         }
         let filter = |lvl: &mut Level, sc: &mut LevelScratch| {
-            dog::derivatives(&lvl.src, &mut lvl.dx, &mut lvl.dy);
+            dog::derivatives_with_workspace(
+                &lvl.src,
+                &mut lvl.dx,
+                &mut lvl.dy,
+                &mut sc.derivative_ws,
+            );
             canny::recoded_canny(
                 &lvl.dx,
                 &lvl.dy,

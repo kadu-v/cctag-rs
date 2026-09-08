@@ -1,5 +1,8 @@
 # Benchmarks — cctag-rs vs upstream C++ (CPU)
 
+For the latest Rust-to-Rust optimization measurements, see the
+[2026-09-09 comparison](#2026-09-09-rust-to-rust-single-thread-optimization) below.
+
 Machine: Apple M3 Max (16 cores: 12P + 4E), macOS, Rust 1.89 (`--release`,
 `lto = "fat"`, `codegen-units = 1`), Apple clang, OpenCV 4.13 / Boost 1.90 /
 Eigen 3.4.0 / oneTBB 2022 from Homebrew. Inputs: `CCTag/sample/01.png`,
@@ -128,3 +131,122 @@ The reliable markers agree in every readable case.
 | 01.png Parity (pyramid/vote parallel, RNG-consuming loops and identification sequential) | 77.7 ms |
 | 02.png Fast | 32.4 ms |
 | 02.png Parity | 79.8 ms |
+
+## 2026-09-09: Rust-to-Rust single-thread optimization
+
+Comparison with the original Rust port, commit `3c582d3`. macOS 26.5 arm64,
+Rust 1.89.0, the same release profile and `png` + default `parallel` features,
+1920×1440 samples, 3 crowns, unchanged default parameters. Each process reuses
+one detector, warms up for 5 detections, then measures 30. Baseline and optimized
+executables alternate for three sets (the second set reverses order); no other
+build, test, or benchmark runs concurrently. Image loading and detector creation
+are outside the measured interval. Stage timers are enabled for both versions.
+
+Table entries are the median of the three per-process medians / p90 values,
+not percentiles pooled across processes. Raw runs, stage measurements, binary
+SHA-256 hashes, and peak RSS are in
+[`benches/results/optimization-2026-09-09.json`](benches/results/optimization-2026-09-09.json).
+
+| Image | Mode | Threads | Before median ms | After median ms | Reduction | Before p90 ms | After p90 ms |
+|---|---|---:|---:|---:|---:|---:|---:|
+| 01.png | Fast | 1 | 106.211 | 81.632 | 23.1% | 106.929 | 81.977 |
+| 02.png | Fast | 1 | 113.311 | 88.748 | 21.7% | 113.778 | 89.225 |
+| 01.png | Fast | 4 | 44.824 | 38.430 | 14.3% | 45.481 | 38.895 |
+| 02.png | Fast | 4 | 46.669 | 40.327 | 13.6% | 47.142 | 40.981 |
+| 01.png | Fast | 16 | 29.513 | 26.798 | 9.2% | 30.232 | 27.103 |
+| 02.png | Fast | 16 | 31.618 | 28.632 | 9.4% | 31.956 | 29.036 |
+| 01.png | Parity | 1 | 106.500 | 81.812 | 23.2% | 107.154 | 82.720 |
+| 02.png | Parity | 1 | 113.388 | 88.791 | 21.7% | 113.978 | 89.281 |
+| 01.png | Parity | 4 | 78.859 | 61.878 | 21.5% | 79.624 | 62.369 |
+| 02.png | Parity | 4 | 81.822 | 64.797 | 20.8% | 82.662 | 65.581 |
+| 01.png | Parity | 16 | 73.637 | 57.579 | 21.8% | 73.943 | 58.065 |
+| 02.png | Parity | 16 | 75.940 | 60.062 | 20.9% | 76.344 | 60.562 |
+
+The primary 1-thread Fast cases improve **23.1% and 21.7%**, exceeding the 20%
+target. Both modes improve at every measured thread count; Fast 16T improves
+9.2–9.4%. Worst optimized 1T p90/median across individual runs is **1.020**.
+
+### End-to-end stage attribution, Fast 1T
+
+| Image | Stage | Before ms | After ms |
+|---|---|---:|---:|
+| 01.png | pyramid | 41.204 | 32.376 |
+| 01.png | multires | 13.839 | 13.872 |
+| 01.png | identification | 51.116 | 35.408 |
+| 02.png | pyramid | 43.825 | 34.992 |
+| 02.png | multires | 17.772 | 17.828 |
+| 02.png | identification | 51.672 | 35.947 |
+
+The serial gradient retains a nine-row ring per pyramid level and avoids
+recomputing interior horizontal rows at block boundaries. AArch64 NEON evaluates
+adjacent pixels with the original tap order. Canny magnitude uses NEON sqrt and
+ties-to-even conversion. Identification holds the 25 independent cost chains in
+SIMD registers, retains each f32 rounding step, and moves validity selection out
+of the sample loop. Temporary signal/count arrays are reused, and thinning only
+clears its required scratch border. Other grid sizes and architectures retain
+generic/scalar paths. No approximation, FMA contraction, parameter tuning, or
+precision reduction is required.
+
+### Memory and correctness
+
+Peak RSS (`/usr/bin/time -l`, including PNG load and process overhead), maximum
+of three runs, Fast 1T: 01.png **71.05 → 71.00 MiB**, 02.png **74.28 → 74.67 MiB**.
+The largest optimized RSS in the entire matrix is **92.72 MiB**. The small
+additional retained workspace on 02.png is included in these measurements.
+
+All final marker output matches the baseline in all 72 benchmark processes.
+Exact regression snapshots also match in both modes at 1/4/16 threads and with
+`parallel` disabled: 17 cases, including 3/4 crowns and 5/7/9 grids, repeated
+calls and detector reuse. Final coordinates, quality, homographies and ellipses
+match at the bit level; coordinate error is **0 px**, so the allowed 0.0001 px
+exception is unused. Intermediate image planes, edge/vote state and seeds match.
+All ten C++ reference cases and ten upstream JSON oracles were present; the
+existing Tier A/B/C tolerances were not changed.
+
+Validation: release tests with all features (36 passed, only the explicit
+baseline recorder ignored); release tests without `parallel` (35 passed);
+Clippy all targets/all features with warnings denied; x86_64-unknown-linux-gnu
+library cross-check for the scalar fallback. Other CPU performance is unmeasured.
+
+### Reproduce the comparison
+
+Build an isolated copy of the baseline with the same measurement CLI (warm-up,
+p90, stage medians); its detector source remains at `3c582d3`:
+
+```bash
+mkdir -p target/baseline-src
+git archive 3c582d3 | tar -x -C target/baseline-src
+cp examples/detect.rs target/baseline-src/examples/detect.rs
+cargo build --release --features png --example detect \
+  --manifest-path target/baseline-src/Cargo.toml --target-dir target/baseline-build
+cargo build --release --features png --example detect
+uv run --no-project python tools/benchmark_compare.py \
+  target/baseline-build/release/examples/detect target/release/examples/detect \
+  --output target/comparison.json
+```
+
+The comparison script requires permission to read process resource statistics
+on macOS (`/usr/bin/time -l`). It fails on command errors or changed marker output.
+
+Criterion now defaults to **one thread**, with image/mode/thread identifiers:
+`CCTAG_BENCH_THREADS=16 cargo bench --features png` selects 16 threads. Stage
+benchmarks exclude thinning/identification input clones and vote input collection
+from the timed section. The detection-only benchmark explicitly includes pyramid
+construction. Earlier Criterion tables above describe the original port and its
+old default-thread measurement setup.
+
+### Criterion stage spot-check, 01.png, 1T
+
+Exploratory `--quick` estimates (single sequential baseline/current sweep;
+end-to-end acceptance uses the three-set measurements above):
+
+| Stage | Before ms | After ms |
+|---|---:|---:|
+| L0/gradient_separable | 23.222 | 16.429 |
+| L0/canny | 4.678 | 4.524 |
+| L0/thinning | 2.115 | 2.075 |
+| identification/parity | 50.947 | 35.327 |
+
+All ten stage benchmarks completed. The gradient micro-benchmark includes its
+compatibility wrapper allocation; the end-to-end pyramid reuses retained scratch.
+Raw estimates: [`benches/results/stages-2026-09-09.json`](benches/results/stages-2026-09-09.json).

@@ -45,8 +45,23 @@ tools/cpp-ref/gen_refs.sh             # ref-exact stage dumps -> testdata/ref/<i
 tools/cpp-ref/gen_upstream_oracle.sh  # unmodified upstream output -> markers_upstream.json
 cargo test --features png,synth,refdata
 tools/cpp-ref/regression_compare.sh   # upstream `regression --compare` on our FileLog XML
-cargo bench --features png
+cargo bench --features png                 # explicit 1-thread baseline
+CCTAG_BENCH_THREADS=16 cargo bench --features png
 ```
+
+For repeatable single-thread timing, exclude warm-up iterations:
+
+```bash
+cargo run --release --features png --example detect -- \
+  CCTag/sample/01.png --threads 1 --warmup 5 --iters 30 --timings
+cargo test --release --all-features
+cargo test --release --no-default-features --features png,synth,refdata,xml
+```
+
+The detector reuses serial gradient buffers and uses AArch64 NEON for gradient,
+Canny magnitude, and 25-point identification costs. Scalar fallbacks retain
+portability. Pre-optimization snapshots check intermediate results and final
+marker float bits; the optimizations require no API or parameter changes.
 
 See `PORTING_NOTES.md` (what is reproduced bit-for-bit, what is tolerance-level
 and why) and `BENCHMARKS.md`.

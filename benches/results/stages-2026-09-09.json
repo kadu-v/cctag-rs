@@ -1,0 +1,107 @@
+{
+  "note": "Criterion --bench --quick, 01.png, one thread; exploratory estimates, not the three-set e2e acceptance measurement.",
+  "baseline": {
+    "L0/downscale": {
+      "lower_ms": 0.45501,
+      "estimate_ms": 0.45548000000000005,
+      "upper_ms": 0.45735000000000003
+    },
+    "L0/gradient_separable": {
+      "lower_ms": 23.215,
+      "estimate_ms": 23.222,
+      "upper_ms": 23.251
+    },
+    "L0/canny": {
+      "lower_ms": 4.6709,
+      "estimate_ms": 4.6778,
+      "upper_ms": 4.7053
+    },
+    "L0/thinning": {
+      "lower_ms": 2.1146,
+      "estimate_ms": 2.1148,
+      "upper_ms": 2.1156
+    },
+    "pyramid/all_levels": {
+      "lower_ms": 42.039,
+      "estimate_ms": 42.083,
+      "upper_ms": 42.26
+    },
+    "L0/collect_edges": {
+      "lower_ms": 1.0618,
+      "estimate_ms": 1.0619,
+      "upper_ms": 1.0622
+    },
+    "L0/vote": {
+      "lower_ms": 2.3194,
+      "estimate_ms": 2.3324,
+      "upper_ms": 2.3844
+    },
+    "pyramid_plus_multires/detect_only": {
+      "lower_ms": 56.077,
+      "estimate_ms": 56.51,
+      "upper_ms": 58.245
+    },
+    "identification/parity": {
+      "lower_ms": 50.879,
+      "estimate_ms": 50.947,
+      "upper_ms": 50.964
+    },
+    "identification/fast": {
+      "lower_ms": 50.888,
+      "estimate_ms": 51.06,
+      "upper_ms": 51.749
+    }
+  },
+  "current": {
+    "L0/downscale": {
+      "lower_ms": 0.46081,
+      "estimate_ms": 0.46134,
+      "upper_ms": 0.46347000000000005
+    },
+    "L0/gradient_separable": {
+      "lower_ms": 16.416,
+      "estimate_ms": 16.429,
+      "upper_ms": 16.482
+    },
+    "L0/canny": {
+      "lower_ms": 4.5203,
+      "estimate_ms": 4.5243,
+      "upper_ms": 4.5403
+    },
+    "L0/thinning": {
+      "lower_ms": 2.0725,
+      "estimate_ms": 2.075,
+      "upper_ms": 2.0756
+    },
+    "pyramid/all_levels": {
+      "lower_ms": 32.2,
+      "estimate_ms": 32.2,
+      "upper_ms": 32.203
+    },
+    "L0/collect_edges": {
+      "lower_ms": 1.0774,
+      "estimate_ms": 1.0823,
+      "upper_ms": 1.0835
+    },
+    "L0/vote": {
+      "lower_ms": 2.2689,
+      "estimate_ms": 2.2815,
+      "upper_ms": 2.3319
+    },
+    "pyramid_plus_multires/detect_only": {
+      "lower_ms": 46.135,
+      "estimate_ms": 46.271,
+      "upper_ms": 46.305
+    },
+    "identification/parity": {
+      "lower_ms": 35.285,
+      "estimate_ms": 35.327,
+      "upper_ms": 35.493
+    },
+    "identification/fast": {
+      "lower_ms": 35.284,
+      "estimate_ms": 35.313,
+      "upper_ms": 35.43
+    }
+  }
+}

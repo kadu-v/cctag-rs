@@ -69,7 +69,12 @@ pub fn recoded_canny(
             let rdx = dx.row(i);
             let rdy = dy.row(i);
             let out = &mut mag[cur + 1..cur + 1 + w];
-            magnitudes(rdx, rdy, out);
+            for j in 0..w {
+                let x = rdx[j] as i32;
+                let y = rdy[j] as i32;
+                let m = ((x as f32) * (x as f32) + (y as f32) * (y as f32)).sqrt();
+                out[j] = m.round_ties_even() as i32;
+            }
         } else {
             mag[cur..cur + mapstep].fill(0);
         }
@@ -150,70 +155,6 @@ pub fn recoded_canny(
         let out = edges.row_mut(i);
         for j in 0..w {
             out[j] = 0u8.wrapping_sub(mrow[j] >> 1);
-        }
-    }
-}
-
-/// Widen before squaring, take the correctly rounded f32 square root, then
-/// round to nearest even. Keep mul/add separate to match scalar Canny.
-fn magnitudes(dx: &[i16], dy: &[i16], out: &mut [i32]) {
-    assert_eq!(dx.len(), dy.len());
-    assert_eq!(dx.len(), out.len());
-    #[cfg(not(target_arch = "aarch64"))]
-    let done = 0;
-    #[cfg(target_arch = "aarch64")]
-    let mut done = 0;
-    #[cfg(target_arch = "aarch64")]
-    {
-        use std::arch::aarch64::*;
-        // SAFETY: NEON is available on AArch64. Each iteration loads/stores
-        // exactly eight elements; the remainder below uses scalar accesses.
-        unsafe {
-            while done + 8 <= out.len() {
-                let x = vld1q_s16(dx.as_ptr().add(done));
-                let y = vld1q_s16(dy.as_ptr().add(done));
-                for (offset, ix, iy) in [
-                    (0, vget_low_s16(x), vget_low_s16(y)),
-                    (4, vget_high_s16(x), vget_high_s16(y)),
-                ] {
-                    let x = vcvtq_f32_s32(vmovl_s16(ix));
-                    let y = vcvtq_f32_s32(vmovl_s16(iy));
-                    let m = vsqrtq_f32(vaddq_f32(vmulq_f32(x, x), vmulq_f32(y, y)));
-                    vst1q_s32(out.as_mut_ptr().add(done + offset), vcvtnq_s32_f32(m));
-                }
-                done += 8;
-            }
-        }
-    }
-    for ((&x, &y), o) in dx[done..].iter().zip(&dy[done..]).zip(&mut out[done..]) {
-        let (x, y) = (x as f32, y as f32);
-        *o = (x * x + y * y).sqrt().round_ties_even() as i32;
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn magnitude_matches_scalar_including_extremes_and_tails() {
-        let dx: Vec<i16> = (i16::MIN as i32..=i16::MAX as i32)
-            .map(|v| v as i16)
-            .collect();
-        for shift in [0, 1, 7, 257, 32767] {
-            let dy: Vec<i16> = dx.iter().map(|&x| x.wrapping_add(shift)).collect();
-            for tail in 0..8 {
-                let n = dx.len() - tail;
-                let mut out = vec![0; n];
-                magnitudes(&dx[..n], &dy[..n], &mut out);
-                for i in 0..n {
-                    let (x, y) = (dx[i] as f32, dy[i] as f32);
-                    assert_eq!(
-                        out[i],
-                        (x * x + y * y).sqrt().round_ties_even() as i32,
-                        "{i} shift={shift}"
-                    );
-                }
-            }
         }
     }
 }

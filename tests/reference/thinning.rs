@@ -14,15 +14,7 @@ pub fn thin(inout: &mut Plane<u8>, temp: &mut Plane<u8>) {
         temp.reset(inout.w, inout.h, 0);
     } else {
         // Border must be 0 (see module docs); interior is fully overwritten.
-        let (w, h) = (temp.w, temp.h);
-        if w > 0 && h > 0 {
-            temp.data[..w].fill(0);
-            temp.data[(h - 1) * w..].fill(0);
-            for row in temp.data.chunks_exact_mut(w) {
-                row[0] = 0;
-                row[w - 1] = 0;
-            }
-        }
+        temp.fill(0);
     }
     image_iter(inout, temp, &LUTTHIN1);
     image_iter(temp, inout, &LUTTHIN2);

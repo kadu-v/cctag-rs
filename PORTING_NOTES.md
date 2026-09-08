@@ -133,3 +133,36 @@ not tighter than upstream's own run-to-run spread.
   `tools/cpp-ref/regression_compare.sh` runs one process per image.
 * The comparison requires the *total* candidate count (including unreliable
   ones) to match; upstream's own runs differ in that count occasionally.
+
+## Result-preserving single-thread optimizations (2026-09-09)
+
+The serial gradient uses a nine-row circular buffer retained per pyramid level,
+removing repeated interior-row filtering at 16-row block boundaries. Parallel
+filtering retains independent blocks. AArch64 NEON processes neighboring pixels
+in the horizontal f64 filter and Canny magnitude calculation. The 25-point centre
+search uses one SIMD lane per grid point, with separate multiply/add and the
+original f32 narrowing after every cost term. Other grid sizes retain the generic
+path, and other architectures use scalar kernels. No detection parameters,
+thresholds, RNG consumption, or tie-breaking rules change.
+
+`tests/optimization_regression.rs` compares against snapshots captured from
+`3c582d3` on aarch64-apple-darwin with Rust 1.89. The 17 cases include both sample
+images, all eight stored synthetic scenes, odd-sized 3/4-crown scenes with 5/7/9
+point grids per axis, and a blank image. It checks pre-identification and final
+markers (float fields encoded by IEEE bits), RNG draws, pyramid planes, Canny,
+thinning, edge collection, vote state and seeds. Large arrays are represented by
+stable FNV-1a digests. Both modes, 1/4/16 threads, repeated calls and detector reuse
+across sizes agree exactly. There is no floating-point tolerance exception in
+this change; measured final coordinate differences are zero. The snapshot's
+reference-capture test is explicitly ignored and refuses to run on modified
+production source; missing required images are errors.
+
+`tests/kernel_regression.rs` retains the original kernels as independent oracles
+for empty/tiny images, borders, tails, thresholds, and reused scratch. The centre
+reference tests also exercise different grids, sticky out-of-bounds flags, stale
+samples and no readable pairs. Magnitude tests cover the full i16 range with
+several gradient pairings and every eight-lane tail length. Existing Tier A/B/C
+C++ comparisons and their tolerances are unchanged. Exact Rust snapshots are a
+regression corpus, not a guarantee of bit identity across different toolchains or
+floating-point environments; non-AArch64 execution performance has not been
+measured here.

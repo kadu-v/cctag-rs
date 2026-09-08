@@ -1,5 +1,5 @@
 //! Minimal detection sample:
-//!   cargo run --release --features png --example detect -- <image.png> [--parity] [--timings] [--iters N] [--threads N] [--filelog out.xml]
+//!   cargo run --release --features png --example detect -- <image.png> [--parity] [--timings] [--iters N] [--warmup N] [--threads N] [--filelog out.xml]
 //! Prints one line per marker: `x y id status quality level`. With `--filelog`
 //! also writes the upstream `regression` tool's FileLog XML for the image.
 
@@ -12,6 +12,7 @@ fn main() {
     let mut mode = ExecMode::Fast;
     let mut timings = false;
     let mut iters = 1usize;
+    let mut warmup = 0usize;
     let mut threads: Option<usize> = None;
     let mut n_crowns = 3usize;
     let mut filelog: Option<String> = None;
@@ -20,6 +21,10 @@ fn main() {
         match args[i].as_str() {
             "--parity" => mode = ExecMode::Parity,
             "--timings" => timings = true,
+            "--warmup" => {
+                i += 1;
+                warmup = args[i].parse().expect("warmup");
+            }
             "--iters" => {
                 i += 1;
                 iters = args[i].parse().expect("iters");
@@ -40,8 +45,9 @@ fn main() {
         }
         i += 1;
     }
-    let path =
-        path.expect("usage: detect <image.png> [--parity] [--timings] [--iters N] [--threads N]");
+    let path = path.expect(
+        "usage: detect <image.png> [--parity] [--timings] [--iters N] [--warmup N] [--threads N]",
+    );
     #[cfg(feature = "parallel")]
     if let Some(t) = threads {
         rayon::ThreadPoolBuilder::new()
@@ -55,11 +61,22 @@ fn main() {
     let mut timer = cctag::timing::StageTimer::new();
     let mut markers = Vec::new();
     let mut times = Vec::with_capacity(iters);
+    assert!(iters > 0, "iters must be positive");
+    for _ in 0..warmup {
+        std::hint::black_box(det.detect(&gray));
+    }
+    let mut stage_samples = std::collections::BTreeMap::<String, Vec<f64>>::new();
     for _ in 0..iters {
         timer.clear();
         let t0 = Instant::now();
         markers = det.detect_timed(&gray, if timings { Some(&mut timer) } else { None });
         times.push(t0.elapsed().as_secs_f64() * 1e3);
+        for (name, duration) in &timer.durations {
+            stage_samples
+                .entry(name.clone())
+                .or_default()
+                .push(duration.as_secs_f64() * 1e3);
+        }
     }
     println!("#frame 0");
     println!("Detected {} candidates", markers.len());
@@ -85,11 +102,24 @@ fn main() {
         iters,
         mode
     );
+    println!(
+        "p90: {:.3} ms; warmup: {warmup}",
+        times[(9 * times.len()).div_ceil(10) - 1]
+    );
     if cfg!(debug_assertions) {
         println!("WARNING: debug build, timings are not meaningful");
     }
     if timings {
-        print!("{}", timer.report());
+        for (name, mut samples) in stage_samples {
+            samples.sort_by(f64::total_cmp);
+            println!(
+                "{name:<24} {:>10.3} ms (median)",
+                samples[samples.len() / 2]
+            );
+        }
+        for (name, count) in &timer.counters {
+            println!("{name:<24} {count:>10}");
+        }
     }
     if let Some(out) = filelog {
         let abs = std::fs::canonicalize(&path)

@@ -1,3 +1,4 @@
+// Frozen from commit 3c582d3; differential oracle, do not optimize.
 //! 9x9 derivative-of-Gaussian gradient, equivalent to the two `cv::filter2D`
 //! calls in `filter/cvRecode.cpp:74-92`.
 //!
@@ -127,98 +128,14 @@ pub fn derivatives_direct(src: &GrayImage, dx: &mut I16Plane, dy: &mut I16Plane)
     }
 }
 
-/// Reusable storage for the serial separable filter. Nine horizontal rows
-/// suffice; each source row is filtered once rather than again at block halos.
-#[derive(Debug, Default)]
-pub(crate) struct DerivativeWorkspace {
-    hx: Vec<f64>,
-    hg: Vec<f64>,
-    accx: Vec<f64>,
-    accy: Vec<f64>,
-}
-
-/// Separable f64 filter with the same tap order and rounding as the original.
-/// The detector retains its workspace; this compatibility entry point owns one
-/// for the duration of the call.
+/// Separable implementation. Accumulates in f64 like the parity reference; the
+/// separable split changes the summation order, which is verified to be within
+/// the f64→i16 rounding margin (see tests).
+///
+/// Rows are processed in blocks: the horizontal passes for the `block + 8` rows
+/// a block needs go to a small ring buffer, so the f64 intermediates never leave
+/// the cache. Blocks are independent and run in parallel when `parallel` is on.
 pub fn derivatives(src: &GrayImage, dx: &mut I16Plane, dy: &mut I16Plane) {
-    derivatives_with_workspace(src, dx, dy, &mut DerivativeWorkspace::default());
-}
-
-pub(crate) fn derivatives_with_workspace(
-    src: &GrayImage,
-    dx: &mut I16Plane,
-    dy: &mut I16Plane,
-    ws: &mut DerivativeWorkspace,
-) {
-    #[cfg(feature = "parallel")]
-    if rayon::current_num_threads() > 1 {
-        derivatives_blocked(src, dx, dy);
-        return;
-    }
-    let (w, h) = (src.w, src.h);
-    // All output pixels are overwritten below. Preserve allocation and avoid
-    // clearing full planes on every frame, without changing Plane::reset.
-    for out in [&mut *dx, &mut *dy] {
-        out.w = w;
-        out.h = h;
-        out.data.resize(w * h, 0);
-    }
-    if w == 0 || h == 0 {
-        return;
-    }
-    let d: [f64; 9] = core::array::from_fn(|c| KERNEL_DX[4][c] as f64);
-    let g: [f64; 9] = core::array::from_fn(|r| KERNEL_DX[r][5] as f64 / d[5]);
-    ws.hx.resize(9 * w, 0.0);
-    ws.hg.resize(9 * w, 0.0);
-    ws.accx.resize(w, 0.0);
-    ws.accy.resize(w, 0.0);
-    for r in 0..8 {
-        let row = src.row(clamp_idx(r as isize - 4, h));
-        horizontal_pass(
-            row,
-            w,
-            &d,
-            &g,
-            &mut ws.hx[r * w..(r + 1) * w],
-            &mut ws.hg[r * w..(r + 1) * w],
-        );
-    }
-    for y in 0..h {
-        let incoming = (y + 8) % 9;
-        let row = src.row((y + 4).min(h - 1));
-        horizontal_pass(
-            row,
-            w,
-            &d,
-            &g,
-            &mut ws.hx[incoming * w..(incoming + 1) * w],
-            &mut ws.hg[incoming * w..(incoming + 1) * w],
-        );
-        ws.accx.fill(0.0);
-        ws.accy.fill(0.0);
-        for r in 0..9 {
-            let ri = (y + r) % 9;
-            let rx = &ws.hx[ri * w..(ri + 1) * w];
-            let rg = &ws.hg[ri * w..(ri + 1) * w];
-            for (((ax, ay), &x), &v) in ws.accx.iter_mut().zip(&mut ws.accy).zip(rx).zip(rg) {
-                *ax += x * g[r];
-                *ay += v * d[r];
-            }
-        }
-        for ((ox, oy), (&ax, &ay)) in dx
-            .row_mut(y)
-            .iter_mut()
-            .zip(dy.row_mut(y))
-            .zip(ws.accx.iter().zip(&ws.accy))
-        {
-            *ox = to_i16(ax);
-            *oy = to_i16(ay);
-        }
-    }
-}
-
-#[cfg(feature = "parallel")]
-fn derivatives_blocked(src: &GrayImage, dx: &mut I16Plane, dy: &mut I16Plane) {
     let (w, h) = (src.w, src.h);
     dx.reset(w, h, 0);
     dy.reset(w, h, 0);
@@ -305,12 +222,8 @@ fn horizontal_pass(
     og: &mut [f64],
 ) {
     if w >= 9 {
-        // Vector lanes are neighboring output pixels, not taps in a sum.
-        #[cfg(target_arch = "aarch64")]
-        let start = horizontal_neon(row, d, g, ox, og);
-        #[cfg(not(target_arch = "aarch64"))]
-        let start = HALF;
-        for x in start..w - HALF {
+        // interior
+        for x in HALF..w - HALF {
             let mut sx = 0.0;
             let mut sg = 0.0;
             for c in 0..9 {
@@ -342,103 +255,5 @@ fn horizontal_pass(
     let hi = w.saturating_sub(HALF);
     for x in hi.max(lo)..w {
         border(x, ox, og);
-    }
-}
-
-#[cfg(target_arch = "aarch64")]
-fn horizontal_neon(
-    row: &[u8],
-    d: &[f64; 9],
-    g: &[f64; 9],
-    ox: &mut [f64],
-    og: &mut [f64],
-) -> usize {
-    use std::arch::aarch64::*;
-    let w = row.len();
-    assert_eq!(ox.len(), w);
-    assert_eq!(og.len(), w);
-    let mut x = HALF;
-    // SAFETY: AArch64 provides NEON. x >= 4 and x+8 <= w-4 ensure
-    // every 8-byte source load and every 2-f64 destination store is in bounds.
-    unsafe {
-        while x + 8 <= w.saturating_sub(HALF) {
-            let mut sx = [vdupq_n_f64(0.0); 4];
-            let mut sg = [vdupq_n_f64(0.0); 4];
-            for c in 0..9 {
-                let pixels = vmovl_u8(vld1_u8(row.as_ptr().add(x + c - HALF)));
-                let lo = vcvtq_f32_u32(vmovl_u16(vget_low_u16(pixels)));
-                let hi = vcvtq_f32_u32(vmovl_u16(vget_high_u16(pixels)));
-                // u8 -> f32 -> f64 is exact throughout.
-                let ps = [
-                    vcvt_f64_f32(vget_low_f32(lo)),
-                    vcvt_f64_f32(vget_high_f32(lo)),
-                    vcvt_f64_f32(vget_low_f32(hi)),
-                    vcvt_f64_f32(vget_high_f32(hi)),
-                ];
-                for q in 0..4 {
-                    sx[q] = vaddq_f64(sx[q], vmulq_n_f64(ps[q], d[c]));
-                    sg[q] = vaddq_f64(sg[q], vmulq_n_f64(ps[q], g[c]));
-                }
-            }
-            for q in 0..4 {
-                vst1q_f64(ox.as_mut_ptr().add(x + q * 2), sx[q]);
-                vst1q_f64(og.as_mut_ptr().add(x + q * 2), sg[q]);
-            }
-            x += 8;
-        }
-    }
-    x
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn kernel_is_rank_one() {
-        let d: [f64; 9] = core::array::from_fn(|c| KERNEL_DX[4][c] as f64);
-        let g: [f64; 9] = core::array::from_fn(|r| KERNEL_DX[r][5] as f64 / d[5]);
-        for r in 0..9 {
-            for c in 0..9 {
-                let k = KERNEL_DX[r][c] as f64;
-                let p = g[r] * d[c];
-                assert!(
-                    (k - p).abs() <= 1e-6 * k.abs().max(1e-7),
-                    "K[{r}][{c}] = {k} vs {p}"
-                );
-            }
-        }
-        // g[k] = exp(-k^2/2), d[k] = k*exp(-k^2/2)/pi
-        for k in 0..9i32 {
-            let t = (k - 4) as f64;
-            let ge = (-t * t / 2.0).exp();
-            let de = t * (-t * t / 2.0).exp() / std::f64::consts::PI;
-            assert!((g[k as usize] - ge).abs() < 1e-6, "g[{k}]");
-            assert!((d[k as usize] - de).abs() < 1e-7, "d[{k}]");
-        }
-    }
-
-    #[test]
-    fn separable_matches_direct() {
-        // pseudo-random small image
-        let (w, h) = (37, 23);
-        let mut s: u32 = 12345;
-        let data: Vec<u8> = (0..w * h)
-            .map(|_| {
-                s = s.wrapping_mul(1664525).wrapping_add(1013904223);
-                (s >> 24) as u8
-            })
-            .collect();
-        let img = GrayImage::from_vec(w, h, data);
-        let (mut a, mut b, mut c, mut d) = (
-            I16Plane::new(0, 0),
-            I16Plane::new(0, 0),
-            I16Plane::new(0, 0),
-            I16Plane::new(0, 0),
-        );
-        derivatives_direct(&img, &mut a, &mut b);
-        derivatives(&img, &mut c, &mut d);
-        assert_eq!(a, c);
-        assert_eq!(b, d);
     }
 }
