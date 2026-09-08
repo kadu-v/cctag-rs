@@ -1,0 +1,56 @@
+From 854264ee47f7837148bb86e4c85108089ba0fc7f Mon Sep 17 00:00:00 2001
+From: kadu-v <kazuonsunday@yahoo.co.jp>
+Date: Tue, 8 Sep 2026 22:08:02 +0900
+Subject: [PATCH] parity harness: rng draw counter
+
+---
+ src/cctag/Statistic.cpp | 8 ++++++++
+ src/cctag/Statistic.hpp | 2 ++
+ 2 files changed, 10 insertions(+)
+
+diff --git a/src/cctag/Statistic.cpp b/src/cctag/Statistic.cpp
+index a1cca9d..f791ec1 100644
+--- a/src/cctag/Statistic.cpp
++++ b/src/cctag/Statistic.cpp
+@@ -14,10 +14,17 @@ namespace numerical {
+ 
+ 
+ static thread_local pcg32 g_rng(271828);
++static thread_local std::size_t g_rngDraws = 0;
+ 
+ void resetRng()
+ {
+   g_rng = pcg32(271828);
++  g_rngDraws = 0;
++}
++
++std::size_t rngDrawCount()
++{
++  return g_rngDraws;
+ }
+ 
+ void rand_5_k(std::array<int, 5>& perm, size_t N)
+@@ -30,6 +37,7 @@ void rand_5_k(std::array<int, 5>& perm, size_t N)
+   for (int i = 0; i < 5; ++i) {
+     do {
+       r = rng(N);
++      ++g_rngDraws;
+     } while (std::find(perm.begin(), it, r) != it);
+     *it++ = r;
+   }
+diff --git a/src/cctag/Statistic.hpp b/src/cctag/Statistic.hpp
+index d012d1b..75f5bff 100644
+--- a/src/cctag/Statistic.hpp
++++ b/src/cctag/Statistic.hpp
+@@ -76,6 +76,8 @@ void rand_5_k(std::array<int, 5>& perm, size_t N);
+ 
+ /// Parity harness: reseed the thread-local generator used by rand_5_k.
+ void resetRng();
++/// Parity harness: number of bounded draws since the last reset.
++std::size_t rngDrawCount();
+ 
+ // median(X) is the median value of the elements in X.
+ float median( std::vector<float>& v );
+-- 
+2.50.1 (Apple Git-155)
+

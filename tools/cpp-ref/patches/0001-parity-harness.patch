@@ -1,0 +1,165 @@
+From 9ecf50ab6f12896e3cf1bd66d1b43e0d01f9a041 Mon Sep 17 00:00:00 2001
+From: kadu-v <kazuonsunday@yahoo.co.jp>
+Date: Tue, 8 Sep 2026 21:50:46 +0900
+Subject: [PATCH] parity harness patches (direct filter, zeroed thinning
+ buffer, stable seed sort, rng reset)
+
+---
+ CMakeLists.txt                |  1 +
+ src/CMakeLists.txt            |  4 ++++
+ src/cctag/Detection.cpp       |  1 +
+ src/cctag/Level.cpp           |  2 +-
+ src/cctag/Multiresolution.cpp |  2 +-
+ src/cctag/Statistic.cpp       |  9 ++++++++-
+ src/cctag/Statistic.hpp       |  3 +++
+ src/cctag/filter/cvRecode.cpp | 27 +++++++++++++++++++++++++++
+ 8 files changed, 46 insertions(+), 3 deletions(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index b31e8fe..eb1ec7a 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -15,6 +15,7 @@ include(GNUInstallDirs)
+ 
+ #CMakeDependentOption
+ option(CCTAG_SERIALIZE "Store all the output" OFF)
++option(CCTAG_PARITY_DUMP "Parity harness: direct (non-DFT) derivative filter, deterministic buffers" OFF)
+ option(CCTAG_VISUAL_DEBUG "Enable visual debug" OFF)
+ option(CCTAG_NO_COUT "Disable output stream" ON)
+ option(CCTAG_WITH_CUDA "Compile the library with CUDA support" ON)
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 15fbbbf..420d104 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -243,6 +243,10 @@ endif()
+ if(CCTAG_SERIALIZE)
+   target_compile_definitions(CCTag PUBLIC "-DCCTAG_SERIALIZE")
+ endif(CCTAG_SERIALIZE)
++
++if(CCTAG_PARITY_DUMP)
++  target_compile_definitions(CCTag PUBLIC "-DCCTAG_PARITY_DIRECT_FILTER")
++endif(CCTAG_PARITY_DUMP)
+ # Disable output stream
+ if(CCTAG_NO_COUT)
+   target_compile_definitions(CCTag PUBLIC "-DCCTAG_NO_COUT")
+diff --git a/src/cctag/Detection.cpp b/src/cctag/Detection.cpp
+index c7e34d2..1063a90 100644
+--- a/src/cctag/Detection.cpp
++++ b/src/cctag/Detection.cpp
+@@ -788,6 +788,7 @@ void cctagDetection(
+     if( durations ) durations->log( "start" );
+   
+     std::srand(1);
++    cctag::numerical::resetRng(); // parity: deterministic across frames/images
+ 
+ #ifdef CCTAG_WITH_CUDA
+     bool cuda_allocates = params._useCuda;
+diff --git a/src/cctag/Level.cpp b/src/cctag/Level.cpp
+index d2d5d2e..83f70f4 100644
+--- a/src/cctag/Level.cpp
++++ b/src/cctag/Level.cpp
+@@ -37,7 +37,7 @@ Level::Level( std::size_t width, std::size_t height, int debug_info_level, bool
+         _mag   = new cv::Mat(height, width, CV_16SC1 );
+         _edges = new cv::Mat(height, width, CV_8UC1);
+     }
+-    _temp = cv::Mat(height, width, CV_8UC1);
++    _temp = cv::Mat::zeros(height, width, CV_8UC1); // parity: deterministic thinning border
+   
+ #ifdef CCTAG_EXTRA_LAYER_DEBUG
+   _edgesNotThin = cv::Mat(height, width, CV_8UC1);
+diff --git a/src/cctag/Multiresolution.cpp b/src/cctag/Multiresolution.cpp
+index d6be28e..1b994b0 100644
+--- a/src/cctag/Multiresolution.cpp
++++ b/src/cctag/Multiresolution.cpp
+@@ -238,7 +238,7 @@ static void cctagMultiresDetection_inner(
+     
+     if( seeds.size() > 1 ) {
+         // Sort the seeds based on the number of received votes.
+-        std::sort(seeds.begin(), seeds.end(), receivedMoreVoteThan);
++        std::stable_sort(seeds.begin(), seeds.end(), receivedMoreVoteThan); // parity: deterministic tie order
+     }
+ 
+ #if defined(CCTAG_WITH_CUDA)
+diff --git a/src/cctag/Statistic.cpp b/src/cctag/Statistic.cpp
+index 5d012dd..a1cca9d 100644
+--- a/src/cctag/Statistic.cpp
++++ b/src/cctag/Statistic.cpp
+@@ -13,9 +13,16 @@ namespace cctag {
+ namespace numerical {
+ 
+ 
++static thread_local pcg32 g_rng(271828);
++
++void resetRng()
++{
++  g_rng = pcg32(271828);
++}
++
+ void rand_5_k(std::array<int, 5>& perm, size_t N)
+ {
+-  static thread_local pcg32 rng(271828);
++  pcg32& rng = g_rng;
+   
+   auto it = perm.begin();
+   int r;
+diff --git a/src/cctag/Statistic.hpp b/src/cctag/Statistic.hpp
+index 4b6cf2c..d012d1b 100644
+--- a/src/cctag/Statistic.hpp
++++ b/src/cctag/Statistic.hpp
+@@ -74,6 +74,9 @@ void rand_n_k(Container &container, size_t N, size_t K)
+ 
+ void rand_5_k(std::array<int, 5>& perm, size_t N);
+ 
++/// Parity harness: reseed the thread-local generator used by rand_5_k.
++void resetRng();
++
+ // median(X) is the median value of the elements in X.
+ float median( std::vector<float>& v );
+ 
+diff --git a/src/cctag/filter/cvRecode.cpp b/src/cctag/filter/cvRecode.cpp
+index 3e20920..c37d1ec 100644
+--- a/src/cctag/filter/cvRecode.cpp
++++ b/src/cctag/filter/cvRecode.cpp
+@@ -84,12 +84,39 @@ void cvRecodedCanny(const cv::Mat& imgGraySrc,
+ 
+     const cv::Mat kerneldY = kerneldX.t();
+ 
++#ifdef CCTAG_PARITY_DIRECT_FILTER
++    // Parity harness: direct double-precision correlation with replicate border.
++    // OpenCV routes 9x9 kernels through a DFT on non-SSE3 hosts, which no spatial
++    // implementation can reproduce bit for bit.
++    auto directCorrelate = [](const cv::Mat& s, cv::Mat& d, const cv::Mat& k) {
++        const int w = s.cols, h = s.rows;
++        for(int y = 0; y < h; ++y) {
++            short* dst = d.ptr<short>(y);
++            for(int x = 0; x < w; ++x) {
++                double acc = 0.0;
++                for(int r = 0; r < 9; ++r) {
++                    const int yy = std::min(std::max(y + r - 4, 0), h - 1);
++                    const uchar* row = s.ptr<uchar>(yy);
++                    for(int c = 0; c < 9; ++c) {
++                        const int xx = std::min(std::max(x + c - 4, 0), w - 1);
++                        acc += (double)row[xx] * (double)k.at<float>(r, c);
++                    }
++                }
++                dst[x] = cv::saturate_cast<short>(cvRound(acc));
++            }
++        }
++    };
++    directCorrelate(imgGraySrc, imgDX, kerneldX);
++    directCorrelate(imgGraySrc, imgDY, kerneldY);
++#else
++
+     // defaults for cv::filter2D
+     const cv::Point anchor{-1, -1};
+     const double delta{0};
+ 
+     cv::filter2D(imgGraySrc, imgDX, CV_16SC1, kerneldX, anchor, delta, cv::BORDER_REPLICATE);
+     cv::filter2D(imgGraySrc, imgDY, CV_16SC1, kerneldY, anchor, delta, cv::BORDER_REPLICATE);
++#endif // CCTAG_PARITY_DIRECT_FILTER
+ 
+ #ifndef USE_INTEGER_REP
+     if(flags & CV_CANNY_L2_GRADIENT)
+-- 
+2.50.1 (Apple Git-155)
+

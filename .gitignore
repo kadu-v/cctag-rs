@@ -1,2 +1,6 @@
 /target
 CCTag
+/build
+/tools/cpp-ref/third_party/
+/testdata/ref/
+/tools/cpp-ref/driver/build/
