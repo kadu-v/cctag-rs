@@ -20,7 +20,9 @@ synth = []
 [dependencies]
 rayon = { version = "1.10", optional = true }
 thiserror = "2"
-image = { version = "0.25", optional = true, default-features = false, features = ["png"] }
+image = { version = "0.25", optional = true, default-features = false, features = [
+    "png",
+] }
 quick-xml = { version = "0.37", optional = true }
 
 [dev-dependencies]
