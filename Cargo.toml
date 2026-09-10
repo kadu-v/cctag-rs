@@ -48,10 +48,20 @@ strip = false
 [profile.bench]
 inherits = "release"
 
+[[example]]
+name = "detect"
+required-features = ["png"]
+
+[[example]]
+name = "synth_gen"
+required-features = ["png", "synth"]
+
 [[bench]]
 name = "e2e"
 harness = false
+required-features = ["png"]
 
 [[bench]]
 name = "stages"
 harness = false
+required-features = ["png"]
